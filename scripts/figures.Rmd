@@ -1,0 +1,665 @@
+---
+title: "Figures"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+This notebook reproduces figures and tables in the paper.
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(tidyr)
+  library(forcats)
+  library(ggplot2)
+  library(ggpubr)
+  library(scales)
+  library(xtable)
+  library(latex2exp)
+})
+source("../src/utils.R")
+source("../src/utils_figures.R")
+theme_set(theme_light() + 
+            theme(panel.grid = element_blank(), 
+                  panel.border = element_blank(), 
+                  axis.line = element_line(size=0.1),
+                  strip.background = element_blank(), 
+                  strip.text = element_text(color="black")))
+
+DIR_FIGURES = "../figures"
+DIR_RESULTS = "../results"
+DIR_DATA = "../data"
+if (!dir.exists(DIR_FIGURES)) dir.create(DIR_FIGURES)
+if (!dir.exists(DIR_RESULTS)) dir.create(DIR_RESULTS)
+ggsave_ = function(filename, ...) ggsave(file.path(DIR_FIGURES, filename), ...)
+```
+
+# Experiments
+
+## Synthetic data
+
+### pvalues
+
+```{r pvalues}
+df_pv_raw = readRDS(file.path(DIR_RESULTS, "pvalue/pvalues.rds"))
+synth = readRDS(file.path(DIR_DATA, "prepared/synthetic.rds"))
+
+#' Plot pvalue qqplot
+#'
+#' @param df 
+#'
+#' @return
+#' @export
+#'
+#' @examples
+plot_pv = function(df) {
+  #df has columns T0,alpha,delta,rep,p1,...,pm
+  df2 = df %>% 
+    pivot_longer(-c(T0, alpha, delta, rep)) %>% 
+    mutate(id = gsub("[a-z]", "", name), 
+           stat = substr(name, 1, 1)) %>% 
+    pivot_wider(id_cols=-name, values_from=value, names_from=stat) %>% 
+    group_by(id) %>% 
+    arrange(id, p) %>% 
+    mutate(idx=percent_rank(p)) %>% 
+    ungroup() 
+  ggplot(df2) + 
+    geom_abline(aes(slope=1,intercept=0), lty=2) + 
+    geom_hline(aes(yintercept=alpha), lwd=0.5, lty=2, col="grey") + 
+    geom_line(aes(idx, p, col=id, lty=id, size=id)) + 
+    scale_color_manual(values=c("1"="black", "2"="grey", "3"="grey", "4"="grey", "5"="darkgrey"), name="Model") +
+    scale_linetype_manual(values=c("1"=1, "2"=1, "2"=1, "3"=1, "4"=1, "5"=5), name="Model") + 
+    scale_size_manual(values=c("1"=.5, "2"=.5, "2"=.5, "3"=.5, "4"=.5, "5"=.7), name="Model") + 
+    theme(legend.position = "top") + 
+    labs(y="pvalue", x="")
+}
+
+#' Transform list of pvalue results to data frame
+#' @param res list of n_rep vectors of length m 
+#' @return data frame with n_rep rows and columns (rep, p_1, ..., p_m)
+pval_list2df = function(res) {
+  m = length(res[[1]]) # Number of pvalues/models. (Should be 5 here).
+  out = matrix(NA, nrow=length(res), ncol=1+m, dimnames=list(NULL, c("rep", paste0("p", 1:m))))
+  for (i in 1:length(res)) {
+    out[i,] = c(i, res[[i]])
+  }
+  as.data.frame(out)
+}
+
+#' Summarize pvalue results
+#'
+#' @param df data frame with a column `res`, see list2df()
+#'
+#' @return data.frame with n_rep*nrow(df) rows, and columns of df with `res`, and with added columns rep,p1,p2,...,pm,s1,...,sm
+#' @export
+#'
+#' @examples
+summarize_pvalues = function(df) {
+  df %>% 
+    as_tibble() %>% 
+    mutate(pv_mat = map(res, pval_list2df)) %>% 
+    select(-res) %>% 
+    unnest(pv_mat)
+}
+
+df_pv = summarize_pvalues(df_pv_raw)
+fig_pvalueqq = df_pv %>% 
+  filter(delta==.1, T0==128) %>% 
+  plot_pv()
+fig_synth_example = plot_loss_profiles(synth["synth_5"]) + theme(strip.text = element_blank()) + ylab("Loss")
+
+fig_pvalueqq
+fig_synth_example
+
+ggsave_("pvalueqq.pdf", fig_pvalueqq + theme(axis.title = element_text(size = 15)), height=2.5, width=3.5)
+ggsave_("synth_example.pdf", fig_synth_example, height=2, width=1.5)
+```
+
+### Error vs data use
+
+```{r error_datause}
+plot_error_datause = function(res) {
+  n_rep = 5000 # From run_error_datause.R
+  delta_to_plot = .05
+  T0_to_plot = c(16, 64, 256)
+  df_opt = res$opt %>% 
+    filter(delta==delta_to_plot)
+  df_ours = res$ours %>%
+    filter(delta==delta_to_plot, 
+           T0 %in% T0_to_plot) %>% 
+    mutate(N=NA) %>% # Placeholder because add_stats requires N.
+    add_stats() %>% 
+    add_n_ci()
+  df_ours_freq = df_ours %>% 
+    as_tibble() %>% 
+    select(T0, n, error_rate) %>% 
+    unnest_longer(n) %>% 
+    group_by(n, error_rate, T0) %>% 
+    summarize(error_rate=mean(error_rate), 
+              T0=mean(T0), 
+              freq=n()/n_rep, 
+              .groups="drop") %>% 
+    arrange(error_rate, T0, n) %>% 
+    select(T0, n, error_rate, freq)
+  
+  alphas = unique(df_ours$alpha)
+  col_opt = "grey"
+  df_opt %>% 
+    mutate(error_avg = map_dbl(error, mean)) %>% 
+    ggplot() + 
+    geom_hline(aes(yintercept=alphas), lty="dotted") + 
+    geom_line(aes(n, error_avg), col=col_opt, lwd=1) + 
+    geom_line(aes(x=n, y=error_rate, group=error_rate, col=as.factor(T0)), data=df_ours_freq, lwd=.5) + 
+    # geom_point(aes(n, error_rate, size=freq, col=as.factor(T0)), data=df_ours_freq, shape="|")+
+    geom_segment(aes(x=n, y=error_rate, xend=n, yend=error_rate*(1+freq*2), col=as.factor(T0)), data=df_ours_freq, lwd=1) + 
+    scale_x_log10() + 
+    scale_y_log10(labels=scales::percent_format(accuracy=.1)) + 
+    scale_size(range=c(2,7)) + 
+    scale_color_ordinal(end=0.8)+
+    labs(x="Data use (n)", y="Error rate", size="% of iterations", col="T")
+}
+
+res_error_datause = readRDS(file.path(DIR_RESULTS, "error_datause/res_synth_5.rds"))
+res_error_datause_real = readRDS(file.path(DIR_RESULTS, "error_datause/res_spambase.rds"))
+
+fig_error_datause = plot_error_datause(res_error_datause) + labs(title="synth_5")
+fig_error_datause_real = plot_error_datause(res_error_datause_real) + labs(title="spambase (k=223)")
+fig_error_datause 
+fig_error_datause_real
+
+ggsave_("error_datause.pdf", fig_error_datause, height=2, width=4.5)
+ggsave_("error_datause_real.pdf", fig_error_datause_real, height=2, width=4.5)
+```
+
+### Toy k vs error and k_best vs error
+
+```{r}
+toy1 = readRDS(file.path(DIR_RESULTS, "toy/toy_exp1.rds"))
+df_toy_raw = readRDS(file.path(DIR_RESULTS, "toy/results_all_processed.rds"))
+df_toy = df_toy_raw  %>% 
+  as_tibble() %>% 
+  # Keep only completed results.
+  filter(!is.na(alpha), !sapply(candidate, length) == 0) %>%
+  add_stats() %>% 
+  add_dummy_error() %>% 
+  select_if(~!is.list(.))
+
+plot_toy_losses = function(losses_list, var = "k=", ncol=1, titles = sapply(strsplit(names(losses_list), ","), function(x) x[grep(var, x)])) {
+  plot_loss_profiles(setNames(losses_list, titles), facet_ncol = ncol)
+}
+```
+
+```{r toy_k}
+fig_toy_k_error = df_toy %>% 
+  filter(exp=="toy_exp1", k_best==1) %>% 
+  ggplot() + 
+  geom_point(aes(k, error_rate)) + 
+  geom_line(aes(k, error_rate)) + 
+  geom_line(aes(k, error_dummy), col="grey") +
+  scale_x_log10() + 
+  scale_y_continuous(labels=scales::percent_format(), limits=c(0,1)) + 
+  labs(x="k", y="Error rate")
+
+df_toy1 = df_toy %>% 
+  filter(exp=="toy_exp1", 
+         acc_max==.9, 
+         k_best==1) 
+y_breaks = c(`2*T0`=2*unique(df_toy1$T0), N=unique(df_toy1$N))
+fig_toy_k_datause = df_toy1 %>% 
+  add_n_ci() %>% 
+  ggplot() + 
+  geom_line(aes(k, data_use_avg)) + 
+  geom_point(aes(k, data_use_avg)) + 
+  geom_hline(aes(yintercept=N), lty=2, lwd=.1)+
+  geom_hline(aes(yintercept=2*T0), lty=2, lwd=.1)+
+  geom_ribbon(aes(x=k, ymin=n_lower, ymax=n_upper), fill="black", alpha=.1) + 
+  labs(x="k", y="Data use")+
+  scale_x_log10() + 
+  scale_y_continuous(limits=c(0, NA), breaks = y_breaks) 
+
+j1 = c("k=4,k_best=1", "k=16,k_best=1")
+fig_toy_k_losses = plot_toy_losses(toy1$data[j1], ncol=2)
+
+fig_toy_k_error
+fig_toy_k_datause
+fig_toy_k_losses
+
+ggsave_("toy_k_error.pdf", fig_toy_k_error + theme(text=element_text(size=15)), height=2, width=2.5)
+ggsave_("toy_k_datause.pdf", fig_toy_k_datause + theme(text=element_text(size=15)), height=2, width=2.5)
+ggsave_("toy_k_losses.pdf", fig_toy_k_losses, height=1.5, width=4)
+```
+
+```{r toy_kbest}
+fig_toy_kbest_error = df_toy %>% 
+  filter(exp=="toy_exp1", 
+         k==32) %>% 
+  ggplot() + 
+  geom_point(aes(k_best, error_rate)) + 
+  geom_line(aes(k_best, error_rate)) + 
+  geom_line(aes(k_best, error_dummy), col="grey") +
+  scale_x_log10() + 
+  scale_y_continuous(labels=scales::percent_format(), limits=c(0,1)) + 
+  labs(x=TeX(r"($k_\delta$)"), y="Error rate")
+
+df_toy2 = df_toy %>% 
+  filter(exp=="toy_exp1", 
+         acc_max==.9, 
+         k==32) 
+y_breaks2 = c(`2*T0`=2*unique(df_toy2$T0), `N/2`=unique(df_toy2$N)/2, `N`=unique(df_toy2$N))
+fig_toy_kbest_datause = df_toy2 %>% 
+  add_n_ci() %>% 
+  ggplot() + 
+  geom_line(aes(k_best, data_use_avg)) + 
+  geom_point(aes(k_best, data_use_avg)) + 
+  geom_ribbon(aes(x=k_best, ymin=n_lower, ymax=n_upper), fill="black", alpha=.1) + 
+  geom_hline(aes(yintercept=N), lty=2, lwd=.1)+
+  geom_hline(aes(yintercept=2*T0), lty=2, lwd=.1)+
+  labs(x=TeX(r"($k_\delta$)"), y="Data use")+
+  scale_x_log10() + 
+  scale_y_continuous(limits=c(1, NA), breaks=y_breaks2)
+
+j2 = c("k=32,k_best=1", "k=32,k_best=16")
+fig_toy_kbest_losses = plot_toy_losses(toy1$data[j2], "k_best", ncol=2, titles = c("k_d=1","k_d=16"))
+fig_toy_kbest_error
+fig_toy_kbest_datause + scale_y_log10()
+fig_toy_kbest_losses
+
+ggsave_("toy_kbest_error.pdf", fig_toy_kbest_error + theme(text=element_text(size=15)), height=2, width=2.5)
+ggsave_("toy_kbest_datause.pdf", fig_toy_kbest_datause + theme(text=element_text(size=15)), height=2, width=2.5)
+ggsave_("toy_kbest_losses.pdf", fig_toy_kbest_losses, height=1.5, width=4)
+```
+
+## Real data
+
+### Parameter tables
+
+```{r make_tables}
+#' Keep only completed results.
+filter_complete = function(df) filter(df, !is.na(alpha), !sapply(candidate, length) == 0)
+# CLS
+df_res_cls_raw = readRDS(file.path(DIR_RESULTS, "param_tables/classification/results_all_processed.rds"))
+df_res_cls = df_res_cls_raw %>% 
+  as_tibble() %>% 
+  filter_complete() %>%
+  add_stats() %>% 
+  mutate(dataset = gsub("_d0.1", "", dataset),
+         has_clear_winner = factor(ifelse(
+           grepl("_clear", dataset), "clear_winner", 
+           ifelse(grepl("_unclear", dataset), "unclear_winner", 
+                  "original")), 
+           levels=c("clear_winner", "unclear_winner", "original"))) %>% 
+  select_if(~!is.list(.)) %>% 
+  arrange(dataset)
+# LL
+df_res_ll_raw = readRDS(file.path(DIR_RESULTS, "param_tables/classification_logloss/results_all_processed.rds"))
+df_res_ll = df_res_ll_raw  %>% 
+  as_tibble() %>% 
+  filter_complete() %>%
+  add_stats() %>% 
+  select_if(~!is.list(.))%>% 
+  arrange(dataset)
+
+# REG
+df_res_reg_raw = readRDS(file.path(DIR_RESULTS, "param_tables/regression/results_all_processed.rds"))
+df_res_reg = df_res_reg_raw  %>% 
+  as_tibble() %>% 
+  filter_complete() %>%
+  add_stats() %>% 
+  mutate(dataset = gsub("\\.fold", "\\.", dataset)) %>% 
+  select_if(~!is.list(.))%>% 
+  arrange(dataset)
+
+# CLS CV
+df_res_cls_cv_raw = readRDS(file.path(DIR_RESULTS, "param_tables/classification_cv/results_all_processed.rds"))
+df_res_cls_cv = df_res_cls_cv_raw %>% 
+  as_tibble() %>% 
+  filter_complete() %>%
+  add_stats() %>% 
+  mutate(dataset = gsub("\\.fold", "\\.", dataset)) %>% 
+  select_if(~!is.list(.))%>% 
+  arrange(dataset)
+
+df_res_all = rbind(select(df_res_cls, -has_clear_winner) %>% mutate(loss="0-1"), 
+                   df_res_ll %>% mutate(loss="logloss"), 
+                   df_res_reg %>% mutate(loss="mse"), 
+                   df_res_cls_cv %>% mutate(loss="0-1"))
+```
+
+```{r}
+FILE_TABLES = file.path(DIR_RESULTS, "table_param_tables.txt")
+filter_full_table = function(df) df %>% filter(alpha==.05) %>% arrange(dataset, delta, T0) %>% select(Dataset=dataset, N, kk_delta, delta, T0, data_use_avgsd, data_use_pct_avg, error_rate, power_emp)
+filter_summary_table = function(df) df %>% filter(T0==128) %>% select(loss, Dataset, N, kk_delta, delta, data_use_avgsd, data_use_pct_avg, error_rate, power_emp)
+
+tbl_cls = df_res_cls %>% format_tbl() %>% filter_full_table()
+tbl_cls_original = tbl_cls %>% filter(!grepl("clear", Dataset))
+tbl_cls_clearunclear = tbl_cls %>% filter(grepl("_clear", Dataset) | grepl("_unclear", Dataset))
+tbl_reg = df_res_reg %>% format_tbl() %>% filter_full_table()
+tbl_ll = df_res_ll %>% format_tbl() %>% filter_full_table()
+
+tbl_clsregll = rbind(tbl_cls_original %>% mutate(loss="0-1") %>% filter_summary_table(), 
+                      tbl_reg %>% mutate(loss="MSE") %>% filter_summary_table(), 
+                      tbl_ll %>% mutate(loss="LL") %>% filter_summary_table())
+
+tbl_cls_cv = df_res_cls_cv %>% 
+  format_tbl() %>% 
+  filter_full_table()
+
+print_tables = function(file="", append=FALSE) {
+  make_caption = function(x) sprintf("Results of running \\bsv\\ with $\\alpha=0.05$ and %s loss. See Table~\\ref{tab:real} for column descriptions.", x)
+  plt = print_latex_table
+  plt(tbl_clsregll %>% mutate(alpha_emp=0) %>% rename2latex() %>% select(-`$\\alpha_{emp}$`), caption="alpha=0.05, T0=128", label="tab:real", file=file, append=TRUE) 
+  plt(tbl_cls_original %>% rename2latex(), caption=make_caption("0--1"), label="tab:classification", file=file, append=TRUE) 
+  plt(tbl_cls_clearunclear %>% rename2latex(), caption=make_caption("0--1"), label="tab:classification_clear", file=file, append=TRUE) 
+  plt(tbl_cls_cv %>% slice(1:floor(nrow(tbl_cls_cv)/2)) %>% rename2latex(), caption=make_caption("0--1"), label="tab:classification_cv1", file=file, append=TRUE)
+  plt(tbl_cls_cv %>% slice((floor(nrow(tbl_cls_cv)/2)+1):nrow(tbl_cls_cv)) %>% rename2latex(), caption=make_caption("0--1"), label="tab:classification_cv2", file=file, append=TRUE)
+  plt(tbl_ll %>% rename2latex(), caption=make_caption("log"), label="tab:ll", file=file, append=TRUE) 
+  plt(tbl_reg %>% rename2latex(), caption=make_caption("MSE"), label="tab:regression", file=file, append=TRUE) 
+}
+
+print_tables(file=FILE_TABLES, append=FALSE)
+```
+
+### delta vs n
+
+```{r delta_n}
+df_delta_cls_raw = readRDS(file.path(DIR_RESULTS, "delta/classification/results_all_processed.rds")) 
+df_delta_cls = df_delta_cls_raw %>% 
+  as_tibble() %>% 
+  mutate(dataset_base = gsub("_unclear|_clear|_d0.1", "", dataset)) %>% 
+  mutate(dataset = gsub("_d0.1", "", dataset),
+         has_clear_winner = factor(ifelse(
+           grepl("_clear", dataset), "clear_winner", 
+           ifelse(grepl("_unclear", dataset), "unclear_winner", 
+                  "original")), 
+           levels=c("clear_winner", "unclear_winner", "original"))) %>% 
+  filter(!is.na(alpha), !sapply(candidate, length) == 0) %>%
+  add_stats() %>% 
+  select_if(~!is.list(.))
+
+plot_delta_n = function(df, ncol=NULL) {
+  # df has columns: T0, N, data_use_avg, data_use_sd, delta, dataset
+  df %>% 
+    mutate(n_lower=pmax(2*T0, data_use_avg-data_use_sd),
+           n_upper=pmin(N, data_use_avg+data_use_sd)) %>% 
+    ggplot() + 
+    geom_hline(aes(yintercept=2*T0), lty=2, lwd=0.2) + 
+    geom_hline(aes(yintercept=N), lty=2, lwd=0.2) + 
+    geom_ribbon(aes(delta, ymin=n_lower, ymax=n_upper), fill="black", alpha=.1) + 
+    geom_line(aes(delta, data_use_avg)) + 
+    scale_y_log10() + 
+    labs(x=TeX("Tolerance ($\\delta$)"), y="Data use (n)") + 
+    facet_wrap(~dataset, scales="free_y", ncol=ncol)
+}
+
+plot_delta_n_clear_unclear = function(df, ncol=NULL) {
+  col_clear_unclear = c("clear_winner"="darkred", "unclear_winner"="darkblue")
+  lty_clear_unclear = c("clear_winner"=1, "unclear_winner"=3)
+  labels = c("clear_winner"="Clear Winner", "unclear_winner"="Unclear Winner")
+  df %>% 
+    filter(has_clear_winner!="original") %>% 
+    add_n_ci() %>% 
+    ggplot() + 
+    geom_hline(aes(yintercept=N), lty=2, lwd=.1) +
+    geom_hline(aes(yintercept=2*T0), lty=2, lwd=.1) +
+    geom_line(aes(delta, data_use_avg, col=has_clear_winner)) + 
+    geom_ribbon(aes(delta, ymin=n_lower, ymax=n_upper, fill=has_clear_winner), alpha=.1) + 
+    scale_y_log10() + 
+    scale_fill_manual(values=col_clear_unclear, name="", labels=labels) +
+    scale_color_manual(values=col_clear_unclear, name="", labels=labels) +
+    labs(x=TeX("Tolerance ($\\delta$)"), y="Data use (n)") + 
+    facet_wrap(~dataset_base, scales="free_y", ncol=ncol)
+}
+```
+
+```{r}
+fig_delta_n_cls = plot_delta_n(df_delta_cls %>% filter(has_clear_winner == "original"), ncol=4)
+fig_delta_n_clear_unclear = plot_delta_n_clear_unclear(df_delta_cls, ncol=4) + theme(legend.position = "bottom")
+
+fig_delta_n_cls
+fig_delta_n_clear_unclear
+
+ggsave_(
+  "delta_n_cls.pdf",
+  fig_delta_n_cls + theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_text(size = 15), 
+    strip.text = element_text(size = 12)
+  ),
+  width = 6,
+  height = 2
+)
+ggsave_(
+  "delta_n_clear_unclear.pdf",
+  fig_delta_n_clear_unclear + theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_text(size = 15), 
+    strip.text = element_text(size = 12)
+  ),
+  width = 6,
+  height = 2 * 1.3
+)
+```
+
+### Comparison to CV
+
+```{r cv}
+df_cv = expand.grid(
+  k = 2^(1:10)
+) %>% 
+  mutate(`\\bsv` = k,
+         `10-fold CV` = k*10, 
+         `LOOCV, $N=100$` = k*100,
+         ) %>% 
+  mutate(across(.fns=as.integer))
+
+print_latex_table(df_cv, caption="Number of model trainings for $k$ models", label="tab:model_train", file=file.path(DIR_RESULTS, "table_cv_comparison.txt"))
+```
+
+### Parameter tuning
+
+```{r param_tuning}
+which_approx_best = function(l, delta) which(l <= min(l) + delta)
+
+summarize_param_tuning = function(res, name) {
+  which_approx_best_on_test = function(delta) which_approx_best(colMeans(res$losses[res$split$i_te,]), delta=delta)
+  k = length(res$models_lambdas)
+  N_tr = length(res$split$i_tr)
+  N_va = length(res$split$i_va)
+  N_te = length(res$split$i_te)
+  lambdas = res$lambdas
+  
+  df_ours = unnest_sim_df(res$ours) 
+  df_ours = df_ours %>% 
+    filter(!sapply(candidate, length)==0) %>% 
+    mutate(true_best = map(delta, which_approx_best_on_test), 
+           N = N_va) %>% 
+    add_stats() %>% 
+    mutate(k_delta = map(true_best, length)) %>% 
+    select_if(~!is.list(.)) %>% 
+    select(-N)
+  cbind(
+    dataset = name,
+    N_tr = N_tr,
+    N_va = N_va,
+    N_te = N_te, 
+    df_ours
+  )
+}
+
+format_tbl_param_tuning = function(df) {
+  df %>% 
+    mutate(T0 = as.integer(T0), 
+           data_use_avg=as.integer(round(data_use_avg, 0)), 
+           data_use_sd=as.integer(round(data_use_sd, 0)),
+           data_use_max=as.integer(data_use_max), 
+           data_use = paste0(data_use_avg, "+-", data_use_sd),
+           delta = formatC(delta)) 
+}
+
+param_tuning_results = readRDS(file.path(DIR_RESULTS, "parameter_tuning/spambase_results_processed.rds"))
+df_param_tuning = summarize_param_tuning(param_tuning_results, "spambase")
+
+df_param_tuning %>% 
+  format_tbl() %>% 
+  filter(alpha == .05) |> 
+  select(delta, T0, data_use_avgsd, data_use_pct_avg, error_rate, alpha_emp, power_emp) %>%
+  rename2latex() %>% 
+  print_latex_table(caption="Parameter tuning for LASSO regression on the spambase dataset", 
+                    label="tab:param_tuning", 
+                    file=file.path(DIR_RESULTS, "table_param_tuning.txt")) 
+```
+
+```{r}
+plot_param_tuning_losses = function(res, i_grid=1) {
+  L_te=colMeans(res$losses[res$split$i_te,])
+  L_va=colMeans(res$losses[res$split$i_va,])
+  lambdas=res$lambdas
+  lambda.1se=res$model_cv$lambda.1se
+  lambda.min=res$model_cv$lambda.min
+  
+  df = data.frame(model_id=1:length(lambdas), 
+                  lambda=lambdas, 
+                  L_te=L_te, 
+                  L_va=L_va)
+  L_min = min(df$L_te)
+  delta = res$ours[i_grid,]$delta
+  df %>% 
+    as_tibble() %>% 
+    ggplot() + 
+    geom_col(aes(lambda, L_te), size=.1) + 
+    geom_hline(aes(yintercept=L_min+delta), lty=2, lwd=.5)+
+    # geom_point(aes(lambda, L_te), col="black", shape=19, size=2, data=df[df$lambda%in%lambda.min,])+
+    annotate("text", x=lambda.min, y=-.07, label="lambda[min]", parse=TRUE) + 
+    geom_rug(aes(x=lambda.min), size=.1, outside=TRUE) +
+    scale_x_log10(breaks=c(.1, .01, 1e-3, 1e-4), labels=c("0.1", "0.01", "0.001", "0.0001"))+
+    coord_cartesian(ylim=c(0, max(L_te)), clip="off") + 
+    labs(x=TeX("Model ($\\lambda$)"), y="Loss on test set")
+}
+
+plot_param_tuning_hist = function(res, i_grid=1) {
+  i_ours = sapply(res$ours[i_grid,]$res[[1]], function(x) x$candidate)
+  lambdas=res$lambdas
+  delta = res$ours[i_grid,]$delta
+  L_te=colMeans(res$losses[res$split$i_te,])
+  true_best = which_approx_best(L_te, delta)
+  df2 = data.frame(ours=i_ours, lambda=lambdas[i_ours])
+  df2 %>% 
+    ggplot() + 
+    geom_vline(aes(xintercept=range(lambdas[true_best])), lty=2, lwd=.5, data=data.frame()) +
+    geom_histogram(aes(lambda), bins = length(lambdas), fill="white", col="black", lwd=.2) + 
+    scale_x_log10(breaks=c(.1, .01, 1e-3, 1e-4), labels=c("0.1", "0.01", "0.001", "0.0001"),limits=range(lambdas))+
+    scale_y_continuous(breaks=c(0, 50, 100), limits=c(0, 100), expand=c(0,0))+
+    labs(x=TeX("Model ($\\lambda$)"), y="# of times selected")
+}
+
+plot_param_tuning = function(res, i_grid=1, title="") {
+  ggpubr::ggarrange(plot_param_tuning_losses(res, i_grid=i_grid) + labs(title=title), 
+                    plot_param_tuning_hist(res, i_grid=i_grid), 
+                    ncol=1)
+}
+paste_params=function(x) paste0(paste0(names(x), "=", x), collapse=",")
+df_grid = param_tuning_results$ours[-4]
+figs_param_tuning = lapply(1:nrow(df_grid), function(i) plot_param_tuning(param_tuning_results, i_grid=i))
+names(figs_param_tuning) = sapply(1:nrow(df_grid), function(i) paste_params(df_grid[i, ]))
+figs_param_tuning$`T0=128,alpha=0.1,delta=0.1` 
+figs_param_tuning$`T0=128,alpha=0.05,delta=0.01`
+
+ggsave_("param_tuning.pdf", figs_param_tuning$`T0=128,alpha=0.1,delta=0.1`, height=3, width=6)
+ggsave_("param_tuning2.pdf", figs_param_tuning$`T0=128,alpha=0.05,delta=0.01`, height=3, width=6)
+```
+
+## Dataset descriptions
+
+```{r}
+data_synth = readRDS(file.path(DIR_DATA, "prepared", "synthetic.rds"))
+data_cls = readRDS(file.path(DIR_DATA, "prepared","cls_zeroone_prepared.rds"))
+data_reg = readRDS(file.path(DIR_DATA, "prepared","reg_mse_prepared.rds"))
+data_nll = readRDS(file.path(DIR_DATA, "prepared", "cls_logloss_prepared.rds"))
+data_cls_cv = readRDS(file.path(DIR_DATA, "prepared", "cls_cv_zeroone_prepared.rds"))
+
+names(data_cls) = gsub("_d0.1", "", names(data_cls))
+names(data_reg) = gsub("\\.fold", "\\.", names(data_reg))
+names(data_cls_cv) = gsub("\\.fold", "\\.", names(data_cls_cv))
+```
+
+### Figures
+
+```{r}
+plot_loss_profile = function(L) {
+  df = data.frame(rank=1:ncol(L), loss=unname(colMeans(L)))
+  ggplot(df, aes(rank, loss)) + 
+    geom_col(size=0.1) +
+    ylim(c(0,NA))+
+    labs(x="", y="")
+}
+
+plot_loss_prof_list = function(L_list, nrow=NULL, ncol=NULL) {
+  figs = lapply(1:length(L_list), function(i) plot_loss_profile(L_list[[i]]) + labs(title=names(L_list)[i]))
+  ggarrange(plotlist=figs, nrow=nrow, ncol=ncol)
+}
+
+
+fig_cls = plot_loss_prof_list(data_cls[!grepl("clear", names(data_cls))], nrow=2, ncol=4)
+fig_cls_clear = plot_loss_prof_list(data_cls[grepl("_clear", names(data_cls))], ncol=4)
+fig_cls_unclear = plot_loss_prof_list(data_cls[grepl("_unclear", names(data_cls))], ncol=4)
+fig_reg = plot_loss_prof_list(data_reg, ncol=4) 
+fig_ll = plot_loss_prof_list(data_nll, nrow=2, ncol=4) 
+fig_cls_cv = plot_loss_prof_list(data_cls_cv, nrow=5, ncol=4) 
+
+fig_cls
+fig_cls_clear
+fig_cls_unclear
+fig_reg
+fig_ll
+fig_cls_cv
+
+ggsave_("loss_profile_cls.pdf", fig_cls, height=2.5, width=8)
+ggsave_("loss_profile_cls_clear.pdf", fig_cls_clear, height=1.25, width=8)
+ggsave_("loss_profile_cls_unclear.pdf", fig_cls_unclear, height=1.25, width=8)
+ggsave_("loss_profile_reg.pdf", fig_reg, height=1.25, width=8)
+ggsave_("loss_profile_ll.pdf", fig_ll, height=2.5, width=8)
+ggsave_("loss_profile_cls_cv.pdf", fig_cls_cv, height=6, width=8)
+```
+
+### Table
+
+```{r}
+FILE_TABLE_DATASETS = file.path(DIR_RESULTS, "table_datasets.txt")
+
+tasks_cls = readRDS(file.path(DIR_DATA, "raw", "raw_cls_tasks.rds"))
+tasks_cls_cv = readRDS(file.path(DIR_DATA, "raw", "raw_cls_cv_tasks.rds"))
+tasks_reg_cv = readRDS(file.path(DIR_DATA, "raw", "raw_reg_cv_tasks.rds"))
+
+make_tasks_table = function(tasks) {
+  df = data.frame(
+    dataset = sapply(tasks, function(x) x$input$data.set$desc$name), 
+    data_id = sapply(tasks, function(x) x$input$data.set$desc$id), 
+    task_id = sapply(tasks, function(x) x$task.id), 
+    row.names = NULL)
+  df
+}
+
+rbind(make_tasks_table(tasks_cls) %>% mutate(loss="0-1, LL") %>% arrange(dataset),
+      make_tasks_table(tasks_reg_cv) %>% mutate(loss="MSE") %>% arrange(dataset),
+      make_tasks_table(tasks_cls_cv) %>% mutate(loss="0-1") %>% arrange(dataset)) %>% 
+  mutate(dataset = gsub("_", "\\_",dataset, fixed=TRUE), 
+         dataset = sprintf("\\texttt{%s}", dataset)) %>%
+  select(loss, everything()) %>% 
+  rename(`Loss`=loss,
+         `Task ID`=task_id, 
+         `Data ID`=data_id, 
+         `Name`=dataset) %>% 
+  print_latex_table(file=FILE_TABLE_DATASETS, 
+                    label="tab:datasets", 
+                    caption="OpenML IDs for datasets used in the experiments")
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
